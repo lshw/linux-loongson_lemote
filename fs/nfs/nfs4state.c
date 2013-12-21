@@ -1073,6 +1073,7 @@ static void nfs_increment_seqid(int status, struct nfs_seqid *seqid)
 		case -NFS4ERR_BADXDR:
 		case -NFS4ERR_RESOURCE:
 		case -NFS4ERR_NOFILEHANDLE:
+		case -NFS4ERR_MOVED:
 			/* Non-seqid mutating errors */
 			return;
 	};
@@ -1482,6 +1483,8 @@ restart:
 					spin_unlock(&state->state_lock);
 				}
 				nfs4_put_open_state(state);
+				clear_bit(NFS4CLNT_RECLAIM_NOGRACE,
+					&state->flags);
 				spin_lock(&sp->so_lock);
 				goto restart;
 			}

@@ -289,6 +289,8 @@ static void md_make_request(struct request_queue *q, struct bio *bio)
 	 * go away inside make_request
 	 */
 	sectors = bio_sectors(bio);
+	/* bio could be mergeable after passing to underlayer */
+	bio->bi_rw &= ~REQ_NOMERGE;
 	mddev->pers->make_request(mddev, bio);
 
 	cpu = part_stat_lock();
@@ -1850,7 +1852,7 @@ super_1_rdev_size_change(struct md_rdev *rdev, sector_t num_sectors)
 	}
 	sb = page_address(rdev->sb_page);
 	sb->data_size = cpu_to_le64(num_sectors);
-	sb->super_offset = rdev->sb_start;
+	sb->super_offset = cpu_to_le64(rdev->sb_start);
 	sb->sb_csum = calc_sb_1_csum(sb);
 	md_super_write(rdev->mddev, rdev, rdev->sb_start, rdev->sb_size,
 		       rdev->sb_page);
@@ -4005,8 +4007,10 @@ new_dev_store(struct mddev *mddev, const char *buf, size_t len)
 	else
 		rdev = md_import_device(dev, -1, -1);
 
-	if (IS_ERR(rdev))
+	if (IS_ERR(rdev)) {
+		mddev_unlock(mddev);
 		return PTR_ERR(rdev);
+	}
 	err = bind_rdev_to_array(rdev, mddev);
  out:
 	if (err)
@@ -5159,6 +5163,7 @@ int md_run(struct mddev *mddev)
 		mddev_detach(mddev);
 		if (mddev->private)
 			pers->free(mddev, mddev->private);
+		mddev->private = NULL;
 		module_put(pers->owner);
 		bitmap_destroy(mddev);
 		return err;
@@ -5294,6 +5299,7 @@ static void md_clean(struct mddev *mddev)
 	mddev->changed = 0;
 	mddev->degraded = 0;
 	mddev->safemode = 0;
+	mddev->private = NULL;
 	mddev->merge_check_needed = 0;
 	mddev->bitmap_info.offset = 0;
 	mddev->bitmap_info.default_offset = 0;
@@ -5361,11 +5367,14 @@ static void __md_stop(struct mddev *mddev)
 {
 	struct md_personality *pers = mddev->pers;
 	mddev_detach(mddev);
+	/* Ensure ->event_work is done */
+	flush_workqueue(md_misc_wq);
 	spin_lock(&mddev->lock);
 	mddev->ready = 0;
 	mddev->pers = NULL;
 	spin_unlock(&mddev->lock);
 	pers->free(mddev, mddev->private);
+	mddev->private = NULL;
 	if (pers->sync_request && mddev->to_remove == NULL)
 		mddev->to_remove = &md_redundancy_group;
 	module_put(pers->owner);
@@ -5735,7 +5744,7 @@ static int get_bitmap_file(struct mddev *mddev, void __user * arg)
 	char *ptr;
 	int err;
 
-	file = kmalloc(sizeof(*file), GFP_NOIO);
+	file = kzalloc(sizeof(*file), GFP_NOIO);
 	if (!file)
 		return -ENOMEM;
 
@@ -6375,7 +6384,7 @@ static int update_array_info(struct mddev *mddev, mdu_array_info_t *info)
 	    mddev->ctime         != info->ctime         ||
 	    mddev->level         != info->level         ||
 /*	    mddev->layout        != info->layout        || */
-	    !mddev->persistent	 != info->not_persistent||
+	    mddev->persistent	 != !info->not_persistent ||
 	    mddev->chunk_sectors != info->chunk_size >> 9 ||
 	    /* ignore bottom 8 bits of state, and allow SB_BITMAP_PRESENT to change */
 	    ((state^info->state) & 0xfffffe00)
@@ -7838,6 +7847,9 @@ void md_do_sync(struct md_thread *thread)
 			break;
 
 		j += sectors;
+		if (j > max_sectors)
+			/* when skipping, extra large numbers can be returned. */
+			j = max_sectors;
 		if (j > 2)
 			mddev->curr_resync = j;
 		if (mddev_is_clustered(mddev))
@@ -7906,6 +7918,12 @@ void md_do_sync(struct md_thread *thread)
 	blk_finish_plug(&plug);
 	wait_event(mddev->recovery_wait, !atomic_read(&mddev->recovery_active));
 
+	if (!test_bit(MD_RECOVERY_RESHAPE, &mddev->recovery) &&
+	    !test_bit(MD_RECOVERY_INTR, &mddev->recovery) &&
+	    mddev->curr_resync > 3) {
+		mddev->curr_resync_completed = mddev->curr_resync;
+		sysfs_notify(&mddev->kobj, NULL, "sync_completed");
+	}
 	/* tell personality that we are finished */
 	mddev->pers->sync_request(mddev, max_sectors, &skipped);
 
@@ -7913,7 +7931,7 @@ void md_do_sync(struct md_thread *thread)
 		md_cluster_ops->resync_finish(mddev);
 
 	if (!test_bit(MD_RECOVERY_CHECK, &mddev->recovery) &&
-	    mddev->curr_resync > 2) {
+	    mddev->curr_resync > 3) {
 		if (test_bit(MD_RECOVERY_SYNC, &mddev->recovery)) {
 			if (test_bit(MD_RECOVERY_INTR, &mddev->recovery)) {
 				if (mddev->curr_resync >= mddev->recovery_cp) {
@@ -8006,8 +8024,7 @@ static int remove_and_add_spares(struct mddev *mddev,
 		       !test_bit(Bitmap_sync, &rdev->flags)))
 			continue;
 
-		if (rdev->saved_raid_disk < 0)
-			rdev->recovery_offset = 0;
+		rdev->recovery_offset = 0;
 		if (mddev->pers->
 		    hot_add_disk(mddev, rdev) == 0) {
 			if (sysfs_link_rdev(mddev, rdev))

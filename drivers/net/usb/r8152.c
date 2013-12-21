@@ -1837,6 +1837,9 @@ static int r8152_poll(struct napi_struct *napi, int budget)
 		napi_complete(napi);
 		if (!list_empty(&tp->rx_done))
 			napi_schedule(napi);
+		else if (!skb_queue_empty(&tp->tx_queue) &&
+			 !list_empty(&tp->tx_free))
+			napi_schedule(napi);
 	}
 
 	return work_done;
@@ -3006,17 +3009,6 @@ static int rtl8152_open(struct net_device *netdev)
 
 	mutex_lock(&tp->control);
 
-	/* The WORK_ENABLE may be set when autoresume occurs */
-	if (test_bit(WORK_ENABLE, &tp->flags)) {
-		clear_bit(WORK_ENABLE, &tp->flags);
-		usb_kill_urb(tp->intr_urb);
-		cancel_delayed_work_sync(&tp->schedule);
-
-		/* disable the tx/rx, if the workqueue has enabled them. */
-		if (netif_carrier_ok(netdev))
-			tp->rtl_ops.disable(tp);
-	}
-
 	tp->rtl_ops.up(tp);
 
 	rtl8152_set_speed(tp, AUTONEG_ENABLE,
@@ -3062,12 +3054,6 @@ static int rtl8152_close(struct net_device *netdev)
 		rtl_stop_rx(tp);
 	} else {
 		mutex_lock(&tp->control);
-
-		/* The autosuspend may have been enabled and wouldn't
-		 * be disable when autoresume occurs, because the
-		 * netif_running() would be false.
-		 */
-		rtl_runtime_suspend_enable(tp, false);
 
 		tp->rtl_ops.down(tp);
 
@@ -3369,7 +3355,7 @@ static int rtl8152_resume(struct usb_interface *intf)
 		netif_device_attach(tp->netdev);
 	}
 
-	if (netif_running(tp->netdev)) {
+	if (netif_running(tp->netdev) && tp->netdev->flags & IFF_UP) {
 		if (test_bit(SELECTIVE_SUSPEND, &tp->flags)) {
 			rtl_runtime_suspend_enable(tp, false);
 			clear_bit(SELECTIVE_SUSPEND, &tp->flags);
@@ -3387,6 +3373,8 @@ static int rtl8152_resume(struct usb_interface *intf)
 		}
 		usb_submit_urb(tp->intr_urb, GFP_KERNEL);
 	} else if (test_bit(SELECTIVE_SUSPEND, &tp->flags)) {
+		if (tp->netdev->flags & IFF_UP)
+			rtl_runtime_suspend_enable(tp, false);
 		clear_bit(SELECTIVE_SUSPEND, &tp->flags);
 	}
 

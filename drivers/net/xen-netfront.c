@@ -305,7 +305,7 @@ static void xennet_alloc_rx_buffers(struct netfront_queue *queue)
 		queue->rx_skbs[id] = skb;
 
 		ref = gnttab_claim_grant_reference(&queue->gref_rx_head);
-		BUG_ON((signed short)ref < 0);
+		WARN_ON_ONCE(IS_ERR_VALUE((unsigned long)(int)ref));
 		queue->grant_rx_ref[id] = ref;
 
 		pfn = page_to_pfn(skb_frag_page(&skb_shinfo(skb)->frags[0]));
@@ -323,7 +323,7 @@ static void xennet_alloc_rx_buffers(struct netfront_queue *queue)
 	queue->rx.req_prod_pvt = req_prod;
 
 	/* Not enough requests? Try again later. */
-	if (req_prod - queue->rx.rsp_cons < NET_RX_SLOTS_MIN) {
+	if (req_prod - queue->rx.sring->req_prod < NET_RX_SLOTS_MIN) {
 		mod_timer(&queue->rx_refill_timer, jiffies + (HZ/10));
 		return;
 	}
@@ -429,7 +429,7 @@ static struct xen_netif_tx_request *xennet_make_one_txreq(
 	id = get_id_from_freelist(&queue->tx_skb_freelist, queue->tx_skbs);
 	tx = RING_GET_REQUEST(&queue->tx, queue->tx.req_prod_pvt++);
 	ref = gnttab_claim_grant_reference(&queue->gref_tx_head);
-	BUG_ON((signed short)ref < 0);
+	WARN_ON_ONCE(IS_ERR_VALUE((unsigned long)(int)ref));
 
 	gnttab_grant_foreign_access_ref(ref, queue->info->xbdev->otherend_id,
 					page_to_mfn(page), GNTMAP_readonly);
@@ -1344,6 +1344,8 @@ static void xennet_disconnect_backend(struct netfront_info *info)
 	for (i = 0; i < num_queues; ++i) {
 		struct netfront_queue *queue = &info->queues[i];
 
+		del_timer_sync(&queue->rx_refill_timer);
+
 		if (queue->tx_irq && (queue->tx_irq == queue->rx_irq))
 			unbind_from_irqhandler(queue->tx_irq, queue);
 		if (queue->tx_irq && (queue->tx_irq != queue->rx_irq)) {
@@ -1353,7 +1355,8 @@ static void xennet_disconnect_backend(struct netfront_info *info)
 		queue->tx_evtchn = queue->rx_evtchn = 0;
 		queue->tx_irq = queue->rx_irq = 0;
 
-		napi_synchronize(&queue->napi);
+		if (netif_running(info->netdev))
+			napi_synchronize(&queue->napi);
 
 		xennet_release_tx_bufs(queue);
 		xennet_release_rx_bufs(queue);
@@ -1698,7 +1701,6 @@ static void xennet_destroy_queues(struct netfront_info *info)
 
 		if (netif_running(info->netdev))
 			napi_disable(&queue->napi);
-		del_timer_sync(&queue->rx_refill_timer);
 		netif_napi_del(&queue->napi);
 	}
 
@@ -1709,19 +1711,19 @@ static void xennet_destroy_queues(struct netfront_info *info)
 }
 
 static int xennet_create_queues(struct netfront_info *info,
-				unsigned int num_queues)
+				unsigned int *num_queues)
 {
 	unsigned int i;
 	int ret;
 
-	info->queues = kcalloc(num_queues, sizeof(struct netfront_queue),
+	info->queues = kcalloc(*num_queues, sizeof(struct netfront_queue),
 			       GFP_KERNEL);
 	if (!info->queues)
 		return -ENOMEM;
 
 	rtnl_lock();
 
-	for (i = 0; i < num_queues; i++) {
+	for (i = 0; i < *num_queues; i++) {
 		struct netfront_queue *queue = &info->queues[i];
 
 		queue->id = i;
@@ -1731,7 +1733,7 @@ static int xennet_create_queues(struct netfront_info *info,
 		if (ret < 0) {
 			dev_warn(&info->netdev->dev,
 				 "only created %d queues\n", i);
-			num_queues = i;
+			*num_queues = i;
 			break;
 		}
 
@@ -1741,11 +1743,11 @@ static int xennet_create_queues(struct netfront_info *info,
 			napi_enable(&queue->napi);
 	}
 
-	netif_set_real_num_tx_queues(info->netdev, num_queues);
+	netif_set_real_num_tx_queues(info->netdev, *num_queues);
 
 	rtnl_unlock();
 
-	if (num_queues == 0) {
+	if (*num_queues == 0) {
 		dev_err(&info->netdev->dev, "no queues\n");
 		return -EINVAL;
 	}
@@ -1791,7 +1793,7 @@ static int talk_to_netback(struct xenbus_device *dev,
 	if (info->queues)
 		xennet_destroy_queues(info);
 
-	err = xennet_create_queues(info, num_queues);
+	err = xennet_create_queues(info, &num_queues);
 	if (err < 0)
 		goto destroy_ring;
 
@@ -2139,8 +2141,11 @@ static int __init netif_init(void)
 
 	pr_info("Initialising Xen virtual ethernet driver\n");
 
-	/* Allow as many queues as there are CPUs, by default */
-	xennet_max_queues = num_online_cpus();
+	/* Allow as many queues as there are CPUs if user has not
+	 * specified a value.
+	 */
+	if (xennet_max_queues == 0)
+		xennet_max_queues = num_online_cpus();
 
 	return xenbus_register_frontend(&netfront_driver);
 }

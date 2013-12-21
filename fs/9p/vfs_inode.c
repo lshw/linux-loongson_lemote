@@ -540,8 +540,7 @@ static struct inode *v9fs_qid_iget(struct super_block *sb,
 	unlock_new_inode(inode);
 	return inode;
 error:
-	unlock_new_inode(inode);
-	iput(inode);
+	iget_failed(inode);
 	return ERR_PTR(retval);
 
 }
@@ -1095,7 +1094,7 @@ static int v9fs_vfs_setattr(struct dentry *dentry, struct iattr *iattr)
 	struct p9_wstat wstat;
 
 	p9_debug(P9_DEBUG_VFS, "\n");
-	retval = inode_change_ok(d_inode(dentry), iattr);
+	retval = setattr_prepare(dentry, iattr);
 	if (retval)
 		return retval;
 

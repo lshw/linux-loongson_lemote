@@ -1757,43 +1757,6 @@ free_dst:
 	goto out;
 }
 
-#ifdef CONFIG_XFRM_SUB_POLICY
-static int xfrm_dst_alloc_copy(void **target, const void *src, int size)
-{
-	if (!*target) {
-		*target = kmalloc(size, GFP_ATOMIC);
-		if (!*target)
-			return -ENOMEM;
-	}
-
-	memcpy(*target, src, size);
-	return 0;
-}
-#endif
-
-static int xfrm_dst_update_parent(struct dst_entry *dst,
-				  const struct xfrm_selector *sel)
-{
-#ifdef CONFIG_XFRM_SUB_POLICY
-	struct xfrm_dst *xdst = (struct xfrm_dst *)dst;
-	return xfrm_dst_alloc_copy((void **)&(xdst->partner),
-				   sel, sizeof(*sel));
-#else
-	return 0;
-#endif
-}
-
-static int xfrm_dst_update_origin(struct dst_entry *dst,
-				  const struct flowi *fl)
-{
-#ifdef CONFIG_XFRM_SUB_POLICY
-	struct xfrm_dst *xdst = (struct xfrm_dst *)dst;
-	return xfrm_dst_alloc_copy((void **)&(xdst->origin), fl, sizeof(*fl));
-#else
-	return 0;
-#endif
-}
-
 static int xfrm_expand_policies(const struct flowi *fl, u16 family,
 				struct xfrm_policy **pols,
 				int *num_pols, int *num_xfrms)
@@ -1865,16 +1828,6 @@ xfrm_resolve_and_create_bundle(struct xfrm_policy **pols, int num_pols,
 
 	xdst = (struct xfrm_dst *)dst;
 	xdst->num_xfrms = err;
-	if (num_pols > 1)
-		err = xfrm_dst_update_parent(dst, &pols[1]->selector);
-	else
-		err = xfrm_dst_update_origin(dst, fl);
-	if (unlikely(err)) {
-		dst_free(dst);
-		XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTBUNDLECHECKERROR);
-		return ERR_PTR(err);
-	}
-
 	xdst->num_pols = num_pols;
 	memcpy(xdst->pols, pols, sizeof(struct xfrm_policy *) * num_pols);
 	xdst->policy_genid = atomic_read(&pols[0]->genid);
@@ -2806,7 +2759,6 @@ static struct neighbour *xfrm_neigh_lookup(const struct dst_entry *dst,
 
 int xfrm_policy_register_afinfo(struct xfrm_policy_afinfo *afinfo)
 {
-	struct net *net;
 	int err = 0;
 	if (unlikely(afinfo == NULL))
 		return -EINVAL;
@@ -2836,26 +2788,6 @@ int xfrm_policy_register_afinfo(struct xfrm_policy_afinfo *afinfo)
 		rcu_assign_pointer(xfrm_policy_afinfo[afinfo->family], afinfo);
 	}
 	spin_unlock(&xfrm_policy_afinfo_lock);
-
-	rtnl_lock();
-	for_each_net(net) {
-		struct dst_ops *xfrm_dst_ops;
-
-		switch (afinfo->family) {
-		case AF_INET:
-			xfrm_dst_ops = &net->xfrm.xfrm4_dst_ops;
-			break;
-#if IS_ENABLED(CONFIG_IPV6)
-		case AF_INET6:
-			xfrm_dst_ops = &net->xfrm.xfrm6_dst_ops;
-			break;
-#endif
-		default:
-			BUG();
-		}
-		*xfrm_dst_ops = *afinfo->dst_ops;
-	}
-	rtnl_unlock();
 
 	return err;
 }
@@ -2891,22 +2823,6 @@ int xfrm_policy_unregister_afinfo(struct xfrm_policy_afinfo *afinfo)
 	return err;
 }
 EXPORT_SYMBOL(xfrm_policy_unregister_afinfo);
-
-static void __net_init xfrm_dst_ops_init(struct net *net)
-{
-	struct xfrm_policy_afinfo *afinfo;
-
-	rcu_read_lock();
-	afinfo = rcu_dereference(xfrm_policy_afinfo[AF_INET]);
-	if (afinfo)
-		net->xfrm.xfrm4_dst_ops = *afinfo->dst_ops;
-#if IS_ENABLED(CONFIG_IPV6)
-	afinfo = rcu_dereference(xfrm_policy_afinfo[AF_INET6]);
-	if (afinfo)
-		net->xfrm.xfrm6_dst_ops = *afinfo->dst_ops;
-#endif
-	rcu_read_unlock();
-}
 
 static int xfrm_dev_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
@@ -3056,7 +2972,6 @@ static int __net_init xfrm_net_init(struct net *net)
 	rv = xfrm_policy_init(net);
 	if (rv < 0)
 		goto out_policy;
-	xfrm_dst_ops_init(net);
 	rv = xfrm_sysctl_init(net);
 	if (rv < 0)
 		goto out_sysctl;
