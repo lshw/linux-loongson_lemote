@@ -208,6 +208,8 @@ static int dwc2_driver_probe(struct platform_device *dev)
 
 	res = platform_get_resource(dev, IORESOURCE_MEM, 0);
 	hsotg->regs = devm_ioremap_resource(&dev->dev, res);
+	if (hsotg->regs == IOMEM_ERR_PTR(-EBUSY)) /* Already requested */
+		hsotg->regs = devm_ioremap(&dev->dev, res->start, resource_size(res));
 	if (IS_ERR(hsotg->regs))
 		return PTR_ERR(hsotg->regs);
 
