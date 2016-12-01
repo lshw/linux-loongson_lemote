@@ -220,7 +220,7 @@ static void dwc2_set_param_phy_utmi_width(struct dwc2_hsotg *hsotg)
 	int val;
 
 	val = (hsotg->hw_params.utmi_phy_data_width ==
-	       GHWCFG4_UTMI_PHY_DATA_WIDTH_8) ? 8 : 16;
+	       GHWCFG4_UTMI_PHY_DATA_WIDTH_16) ? 16 : 8;
 
 	hsotg->params.phy_utmi_width = val;
 }
@@ -721,6 +721,10 @@ int dwc2_init_params(struct dwc2_hsotg *hsotg)
 		set_params = match->data;
 		set_params(hsotg);
 	}
+
+#ifdef CONFIG_CPU_LOONGSON3
+	hsotg->params.hibernation = 1;
+#endif
 
 	dwc2_check_params(hsotg);
 
