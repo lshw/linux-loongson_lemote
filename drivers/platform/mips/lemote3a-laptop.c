@@ -159,6 +159,7 @@ static int lemote3a_laptop_suspend(struct platform_device * pdev, pm_message_t s
 /* Platform device resume handler */
 static int lemote3a_laptop_resume(struct platform_device * pdev);
 static ssize_t lemote3a_get_version(struct device_driver * driver, char * buf);
+static ssize_t lemote3a_set_data_destroy(struct device_driver *driver, const char *buf, size_t count);
 
 /* Camera control misc device open handler */
 static int lemote3a_cam_misc_open(struct inode * inode, struct file * filp);
@@ -230,6 +231,8 @@ static int lemote3a_hotkey_init(void);
 static void lemote3a_hotkey_exit(void);
 extern int ec_query_get_event_num(void);
 
+static int lemote3a_healthy_led_init(void);
+
 static int __devinit wpce775l_probe(struct platform_device *dev);
 
 /* Platform driver object */
@@ -247,6 +250,7 @@ static struct platform_driver platform_driver =
 #endif /* CONFIG_PM */
 };
 static DRIVER_ATTR(version, S_IRUGO, lemote3a_get_version, NULL);
+static DRIVER_ATTR(data_destroy, S_IWUSR, NULL, lemote3a_set_data_destroy);
 
 /* Camera control misc device object file operations */
 static const struct file_operations lemote3a_cam_misc_fops =
@@ -481,6 +485,8 @@ static int __devinit wpce775l_probe(struct platform_device *dev)
 	}
 	/* Camera control misc Device END */
 
+	ret = lemote3a_healthy_led_init();
+
 	/* Request control for backlight device START */
 	ec_write(INDEX_BACKLIGHT_CTRLMODE, BACKLIGHT_CTRL_BYHOST);
 	/* Request control for backlight device END */
@@ -519,7 +525,9 @@ static int __init lemote3a_laptop_init(void)
 		printk(KERN_ERR "Lemote Laptop Platform Driver: Fail to register lemote laptop platform driver.\n");
 		return ret;
 	}
+
 	ret = driver_create_file(&platform_driver.driver, &driver_attr_version);
+	ret = driver_create_file(&platform_driver.driver, &driver_attr_data_destroy);
 
 	return ret;
 }
@@ -606,6 +614,22 @@ static int lemote3a_laptop_resume(struct platform_device * pdev)
 static ssize_t lemote3a_get_version(struct device_driver * driver, char * buf)
 {
 	return sprintf(buf, "%s\n", version);
+}
+
+/* the sysctl for the led of data destroy */
+static ssize_t lemote3a_set_data_destroy(struct device_driver *driver, const char *buf, size_t count)
+{
+	int value;
+
+	if (!sscanf(buf, "%d", &value))
+		return -EINVAL;
+
+	if ('0' == buf[0])
+		ec_write(INDEX_DATA_DESTROY, DATA_DESTROY_OFF);
+	else
+		ec_write(INDEX_DATA_DESTROY, DATA_DESTROY_ON);
+
+	return count;
 }
 
 /* Camera control misc device open handler */
@@ -1191,6 +1215,25 @@ static void lemote3a_tp_led_set(struct led_classdev *led_cdev,
 	int val = brightness ? TP_EN_LED_ON : TP_EN_LED_OFF;
 
 	ec_write(INDEX_TOUCHPAD_ENABLE_LED, val);
+}
+
+static struct delayed_work healthy_led_control;
+
+static void do_healthy_led_timer(struct work_struct *work)
+{
+	static unsigned char times_count = 0;
+
+	ec_write(INDEX_BOARD_HEALTHY, times_count);
+	schedule_delayed_work(&healthy_led_control, msecs_to_jiffies(500));
+	times_count++;
+}
+
+static int lemote3a_healthy_led_init(void)
+{
+	INIT_DEFERRABLE_WORK(&healthy_led_control, do_healthy_led_timer);
+	schedule_delayed_work(&healthy_led_control, 0);
+
+	return 0;
 }
 
 /* Hotkey device init handler */
